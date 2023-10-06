@@ -68,6 +68,7 @@ HAP_SERVICE_TYPE = "_hap._tcp.local."
 VALID_MDNS_REGEX = re.compile(r"[^A-Za-z0-9\-]+")
 LEADING_TRAILING_SPACE_DASH = re.compile(r"^[ -]+|[ -]+$")
 DASH_REGEX = re.compile(r"[-]+")
+KEYS_TO_EXCLUDE = set((HAP_REPR_IID, HAP_REPR_AID))
 
 
 def _wrap_char_setter(char, value, client_addr):
@@ -867,28 +868,10 @@ class AccessoryDriver:
         else:
             expired = False
         
-        updates = {
-            aid: {
-                iid: {k:v for k, v in list(iquery)[0].items() if k not in ('aid', 'iid')}
-                for iid, iquery in itertools.groupby(query, key=lambda q: q[HAP_REPR_IID])
-            }
-            for aid, query in itertools.groupby(sorted(chars_query[HAP_REPR_CHARS], key=lambda q: q[HAP_REPR_AID]), key=lambda q: q[HAP_REPR_AID])
-        }
-        to_notify = [
-            (aid, iid, query[HAP_PERMISSION_NOTIFY]) 
-            for aid, iid_query in updates.items()
-            for iid, query in iid_query.items() 
-            if HAP_PERMISSION_NOTIFY in query
-        ]
-        to_update = {k: v for k, v in {
-            aid: {
-                iid: (query.get(HAP_REPR_VALUE, None), query.get(HAP_REPR_WRITE_RESPONSE, False))
-                for iid, query in iid_query.items() 
-                if HAP_REPR_VALUE in query or expired
-            }
-            for aid, iid_query in updates.items() 
-        }.items() if len(v)}
-
+        queries = chars_query.get(HAP_REPR_CHARS, [])
+        queries_by_aid = itertools.groupby(queries, key=lambda q: q[HAP_REPR_AID])
+        
+        to_notify = ((q[HAP_REPR_AID], q[HAP_REPR_IID], q[HAP_PERMISSION_NOTIFY]) for q in queries if HAP_PERMISSION_NOTIFY in q)
         for aid, iid, ev in to_notify:
             char_topic = get_topic(aid, iid)
             action = "Subscribed" if ev else "Unsubscribed"
@@ -898,63 +881,79 @@ class AccessoryDriver:
             self.async_subscribe_client_topic(
                 client_addr, char_topic, ev
             )
+
+        queries_by_aid_iid = {
+            aid: {
+                iid: {k:v for k, v in list(iquery)[0].items() if k not in KEYS_TO_EXCLUDE}
+                for iid, iquery in itertools.groupby(query, key=lambda q: q[HAP_REPR_IID])
+            } for aid, query in queries_by_aid
+        }
         
+        to_update = (
+            (
+                q[HAP_REPR_AID], q[HAP_REPR_IID],
+                q.get(HAP_REPR_VALUE, None), q.get(HAP_REPR_WRITE_RESPONSE, False)
+            ) 
+            for q in queries
+            if HAP_REPR_VALUE in q or expired
+        )
+            
         results = {}
-            
-        for aid, iid_value_wr in to_update.items():
-            if self.accessory.aid == aid:
-                acc = self.accessory
+        updates_by_accessories_services = {}
+        char_to_iid = {}
+        
+        for aid, iid, value, write_response_requested in to_update:
+            acc = self.accessory if self.accessory.aid == aid else self.accessory.accessories.get(aid)
+            char = acc.get_characteristic(aid, iid)
+
+            if value is None:
+                set_result, set_result_value = HAP_SERVER_STATUS.INVALID_VALUE_IN_REQUEST, None
             else:
-                acc = self.accessory.accessories.get(aid)
-
-            updates_by_service = {}
-            char_to_iid = {}
-
-            for iid, (value, write_response_requested) in iid_value_wr.items():
-                char = acc.get_characteristic(aid, iid)
-
-                if value is None:
-                    set_result = HAP_SERVER_STATUS.INVALID_VALUE_IN_REQUEST
-                    set_result_value = None 
-                else:
-                    set_result, set_result_value = _wrap_char_setter(char, value, client_addr)
+                set_result, set_result_value = _wrap_char_setter(char, value, client_addr)
+        
+            results.setdefault(aid, {})[iid] = {
+                HAP_REPR_STATUS: set_result,
+                **(
+                    {HAP_REPR_VALUE: set_result_value} 
+                    if (set_result_value is not None and write_response_requested) 
+                    else {}
+                ),
+            }
             
-                results.setdefault(aid, {})[iid] = {
-                    HAP_REPR_STATUS: set_result,
-                    **({HAP_REPR_VALUE: set_result_value} if (set_result_value is not None and write_response_requested) else {}),
-                }
-                
-                if not char.service or (
-                    not acc.setter_callback and not char.service.setter_callback
-                ):
-                    continue
-                char_to_iid[char] = iid
-                updates_by_service.setdefault(char.service, {}).update({char: value})
+            #if char.service and (acc.setter_callback or char.service.setter_callback):
 
+            char_to_iid[char] = iid
+            updates_by_accessories_services.setdefault(acc, {}) \
+                    .setdefault(char.service, {}).update({char: value})     
+                    
+        for acc, updates_by_service in updates_by_accessories_services.items():
             # Accessory level setter callbacks
             if acc.setter_callback:
                 set_result = _wrap_acc_setter(acc, updates_by_service, client_addr)
-                for iid in updates[aid]:
+                for iid in queries_by_aid_iid[aid]:
                     original = results.get(aid, {}).get(iid, {})
-                    results.setdefault(aid, {})[iid] = {HAP_REPR_STATUS: set_result}
-
+                    results.setdefault(aid, {})[iid] = {
+                        **original, 
+                        HAP_REPR_STATUS: set_result
+                    }
             # Service level setter callbacks
             for service, chars in updates_by_service.items():
-                if not service.setter_callback:
-                    continue
-                set_result = _wrap_service_setter(service, chars, client_addr)
-                for char in chars:
-                    original = results.get(aid, {}).get(char_to_iid[char], {})
-                    results.setdefault(aid, {})[char_to_iid[char]] = {**original, HAP_REPR_STATUS: set_result}
+                if service.setter_callback:
+                    set_result = _wrap_service_setter(service, chars, client_addr)
+                    for char in chars:
+                        original = results.get(aid, {}).get(char_to_iid[char], {})
+                        results.setdefault(aid, {})[char_to_iid[char]] = {
+                            **original, 
+                            HAP_REPR_STATUS: set_result
+                        }
 
         all_results = [(aid, iid, result) for aid, iid_result in results.items() for iid, result in iid_result.items()]
-        nonempty_results = [(aid, iid, result) for (aid, iid, result) in all_results if result != {HAP_REPR_STATUS: HAP_SERVER_STATUS.SUCCESS}]
+        nonempty_results = [r for r in all_results if r[-1] != {HAP_REPR_STATUS: HAP_SERVER_STATUS.SUCCESS}]
 
         if len(nonempty_results) == 0:
-            print(f"return None")
             return None 
         
-        result = {
+        return {
             HAP_REPR_CHARS: [
                 {
                     HAP_REPR_AID: aid,
@@ -964,8 +963,6 @@ class AccessoryDriver:
                 for aid, iid, result in all_results
             ]
         }
-        print(f"return {result}")
-        return result
 
     def prepare(self, prepare_query, client_addr):
         """Called from ``HAPServerHandler`` when iOS wants to prepare a write.
