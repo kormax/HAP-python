@@ -74,7 +74,7 @@ KEYS_TO_EXCLUDE = set((HAP_REPR_IID, HAP_REPR_AID))
 def _wrap_char_setter(char, value, client_addr):
     """Process an characteristic setter callback trapping and logging all exceptions."""
     try:
-        result = char.client_update_value(value, client_addr)
+        response = char.client_update_value(value, client_addr)
     except Exception:  # pylint: disable=broad-except
         logger.exception(
             "%s: Error while setting characteristic %s to %s",
@@ -83,7 +83,7 @@ def _wrap_char_setter(char, value, client_addr):
             value,
         )
         return HAP_SERVER_STATUS.SERVICE_COMMUNICATION_FAILURE, None
-    return HAP_SERVER_STATUS.SUCCESS, result
+    return HAP_SERVER_STATUS.SUCCESS, response
 
 
 def _wrap_acc_setter(acc, updates_by_service, client_addr):
@@ -903,6 +903,7 @@ class AccessoryDriver:
         char_to_iid = {}
         
         for aid, iid, value, write_response_requested in to_update:
+            #print(f"{aid:3}:{iid:3} {value:8} {write_response_requested}")
             acc = self.accessory if self.accessory.aid == aid else self.accessory.accessories.get(aid)
             char = acc.get_characteristic(aid, iid)
 
@@ -919,13 +920,53 @@ class AccessoryDriver:
                     else {}
                 ),
             }
-            
-            #if char.service and (acc.setter_callback or char.service.setter_callback):
 
             char_to_iid[char] = iid
             updates_by_accessories_services.setdefault(acc, {}) \
                     .setdefault(char.service, {}).update({char: value})     
-                    
+    
+        print(f"updates_by_accessories_services={updates_by_accessories_services}")
+        # tests/test_accessory_driver.py:507: AssertionError
+        # updates_by_accessories_services={
+        #       <accessory display_name='TestAcc' services=['AccessoryInformation', 'Lightbulb']>: 
+        #       {
+        #           <service display_name=Lightbulb unique_id=None chars={'On': 1, 'Brightness': 88}>: {
+        #               <characteristic display_name=On unique_id=None value=1 properties={'Format': 'int', 'Permissions': 'pr'}>: True, 
+        #               <characteristic display_name=Brightness unique_id=None value=88 properties={'Format': 'int', 'Permissions': 'pr'}>: 88
+        #           }
+        #       }, 
+        #       <accessory display_name='TestAcc2' services=['AccessoryInformation', 'Lightbulb']>: {
+        #           <service display_name=Lightbulb unique_id=None chars={'On': 1, 'Brightness': 12}>: {
+        #               <characteristic display_name=On unique_id=None value=1 properties={'Format': 'int', 'Permissions': 'pr'}>: True, 
+        #               <characteristic display_name=Brightness unique_id=None value=12 properties={'Format': 'int', 'Permissions': 'pr'}>: 12
+        #           }
+        #       }
+        # }
+
+        # acc=<accessory display_name='TestAcc' services=['AccessoryInformation', 'Lightbulb']>, 
+        # updates_by_service={<service display_name=Lightbulb unique_id=None chars={'On': 1, 'Brightness': 88}>: {
+        #   <characteristic display_name=On unique_id=None value=1 properties={'Format': 'int', 'Permissions': 'pr'}>: True, 
+        #   <characteristic display_name=Brightness unique_id=None value=88 properties={'Format': 'int', 'Permissions': 'pr'}>: 88}}
+        
+        # acc=<accessory display_name='TestAcc2' services=['AccessoryInformation', 'Lightbulb']>, 
+        # updates_by_service={<service display_name=Lightbulb unique_id=None chars={'On': 1, 'Brightness': 12}>: {
+        #   <characteristic display_name=On unique_id=None value=1 properties={'Format': 'int', 'Permissions': 'pr'}>: True, 
+        #   <characteristic display_name=Brightness unique_id=None value=12 properties={'Format': 'int', 'Permissions': 'pr'}>: 12}}
+
+
+        # {
+        #   'characteristics': [
+        #       {'aid': 2, 'iid': 9, 'status': 0}, 
+        #       {'aid': 2, 'iid': 10, 'status': 0}, 
+        #       {'aid': 3, 'iid': 9, 'status': -70402}, 
+        #       {'aid': 3, 'iid': 10, 'status': -70402}]} 
+        # 
+        # { 
+        #   'characteristics': [
+        #       {'aid': 2, 'iid': 9, 'status': -70402},
+        #       {'aid': 2, 'iid': 10, 'status': -70402},
+        #       {'aid': 3, 'iid': 9, 'status': -70402},
+        #       {'aid': 3, 'iid': 10, 'status': 0}]}
         for acc, updates_by_service in updates_by_accessories_services.items():
             # Accessory level setter callbacks
             if acc.setter_callback:
