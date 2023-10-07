@@ -902,13 +902,16 @@ class AccessoryDriver:
         }.items() if len(v)}
 
         results = {}
+        print(f"inital results={results}")
             
         for aid, iid_value_wr in to_update.items():
+            print(f"loop1b results={results}")
             acc = self.accessory if self.accessory.aid == aid else self.accessory.accessories.get(aid)
             updates_by_service = {}
             char_to_iid = {}
 
             for iid, (value, write_response_requested) in iid_value_wr.items():
+                print(f"loop2b results={results}")
                 char = acc.get_characteristic(aid, iid)
 
                 if value is None:
@@ -931,6 +934,10 @@ class AccessoryDriver:
                     char_to_iid[char] = iid
                     updates_by_service.setdefault(char.service, {}).update({char: value})
 
+                print(f"loop2e results={results}")
+
+
+            
             # Accessory level setter callbacks
             if acc.setter_callback:
                 set_result = _wrap_acc_setter(acc, updates_by_service, client_addr)
@@ -952,6 +959,9 @@ class AccessoryDriver:
                         **original, 
                         HAP_REPR_STATUS: set_result
                     }
+            print(f"loop1e results={results}")
+
+        print(f"finalr results={results}")
 
         all_results = [(aid, iid, result) for aid, iid_result in results.items() for iid, result in iid_result.items()]
         nonempty_results = [r for r in all_results if r[-1] != {HAP_REPR_STATUS: HAP_SERVER_STATUS.SUCCESS}]
