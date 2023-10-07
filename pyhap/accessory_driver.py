@@ -17,7 +17,6 @@ the Characteristic does not block waiting for the actual send to happen.
 """
 import asyncio
 import base64
-import itertools
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import logging
@@ -860,19 +859,16 @@ class AccessoryDriver:
 
         :type chars_query: dict
         """
-        # TODO: Add support for chars that do no support notifications.    
-        if HAP_REPR_PID in chars_query:
-            pid = chars_query[HAP_REPR_PID]
-            expire_time = self.prepared_writes.get(client_addr, {}).pop(pid, None)
-            expired = expire_time is None or time.time() > expire_time
-        else:
-            expired = False
-        
+        # TODO: Add support for chars that do no support notifications.
+
+        pid = chars_query.get(HAP_REPR_PID, None)
+        expire_time = self.prepared_writes.get(client_addr, {}).pop(pid, None)
+        expired = False if pid is None else expire_time is None or time.time() > expire_time
         queries = chars_query.get(HAP_REPR_CHARS, [])
-        queries_by_aid = itertools.groupby(queries, key=lambda q: q[HAP_REPR_AID])
-        
-        to_notify = ((q[HAP_REPR_AID], q[HAP_REPR_IID], q[HAP_PERMISSION_NOTIFY]) for q in queries if HAP_PERMISSION_NOTIFY in q)
-        for aid, iid, ev in to_notify:
+
+        to_notify = (query for query in queries if HAP_PERMISSION_NOTIFY in query)
+        for query in to_notify:
+            aid, iid, ev = query[HAP_REPR_AID], query[HAP_REPR_IID], query[HAP_PERMISSION_NOTIFY]
             char_topic = get_topic(aid, iid)
             action = "Subscribed" if ev else "Unsubscribed"
             logger.debug(
@@ -882,127 +878,83 @@ class AccessoryDriver:
                 client_addr, char_topic, ev
             )
 
-        queries_by_aid_iid = {
-            aid: {
-                iid: {k:v for k, v in list(iquery)[0].items() if k not in KEYS_TO_EXCLUDE}
-                for iid, iquery in itertools.groupby(query, key=lambda q: q[HAP_REPR_IID])
-            } for aid, query in queries_by_aid
-        }
-        
-        to_update = (
-            (
-                q[HAP_REPR_AID], q[HAP_REPR_IID],
-                q.get(HAP_REPR_VALUE, None), q.get(HAP_REPR_WRITE_RESPONSE, False)
-            ) 
-            for q in queries
-            if HAP_REPR_VALUE in q or expired
-        )
-            
         results = {}
         updates_by_accessories_services = {}
         char_to_iid = {}
         
-        for aid, iid, value, write_response_requested in to_update:
-            #print(f"{aid:3}:{iid:3} {value:8} {write_response_requested}")
-            acc = self.accessory if self.accessory.aid == aid else self.accessory.accessories.get(aid)
+        to_update = (query for query in queries if HAP_REPR_VALUE in query or expired)
+        for query in to_update:
+            aid, iid = query[HAP_REPR_AID], query[HAP_REPR_IID]
+            value = query.get(HAP_REPR_VALUE, None)
+            write_response_requested = query.get(HAP_REPR_WRITE_RESPONSE, False)
+
+            acc = self.accessory if self.accessory.aid == aid else None
+            acc = acc or self.accessory.accessories.get(aid)
+
             char = acc.get_characteristic(aid, iid)
 
-            if value is None:
-                set_result, set_result_value = HAP_SERVER_STATUS.INVALID_VALUE_IN_REQUEST, None
-            else:
+            set_result, set_result_value = HAP_SERVER_STATUS.INVALID_VALUE_IN_REQUEST, None
+            if value is not None:
                 set_result, set_result_value = _wrap_char_setter(char, value, client_addr)
-        
+
+            value_in_response = set_result_value is not None and write_response_requested
+
             results.setdefault(aid, {})[iid] = {
                 HAP_REPR_STATUS: set_result,
-                **(
-                    {HAP_REPR_VALUE: set_result_value} 
-                    if (set_result_value is not None and write_response_requested) 
-                    else {}
-                ),
+                **({HAP_REPR_VALUE: set_result_value} if value_in_response else {}),
             }
 
             char_to_iid[char] = iid
-            updates_by_accessories_services.setdefault(acc, {}) \
-                    .setdefault(char.service, {}).update({char: value})     
-    
-        print(f"updates_by_accessories_services={updates_by_accessories_services}")
-        # tests/test_accessory_driver.py:507: AssertionError
-        # updates_by_accessories_services={
-        #       <accessory display_name='TestAcc' services=['AccessoryInformation', 'Lightbulb']>: 
-        #       {
-        #           <service display_name=Lightbulb unique_id=None chars={'On': 1, 'Brightness': 88}>: {
-        #               <characteristic display_name=On unique_id=None value=1 properties={'Format': 'int', 'Permissions': 'pr'}>: True, 
-        #               <characteristic display_name=Brightness unique_id=None value=88 properties={'Format': 'int', 'Permissions': 'pr'}>: 88
-        #           }
-        #       }, 
-        #       <accessory display_name='TestAcc2' services=['AccessoryInformation', 'Lightbulb']>: {
-        #           <service display_name=Lightbulb unique_id=None chars={'On': 1, 'Brightness': 12}>: {
-        #               <characteristic display_name=On unique_id=None value=1 properties={'Format': 'int', 'Permissions': 'pr'}>: True, 
-        #               <characteristic display_name=Brightness unique_id=None value=12 properties={'Format': 'int', 'Permissions': 'pr'}>: 12
-        #           }
-        #       }
-        # }
 
-        # acc=<accessory display_name='TestAcc' services=['AccessoryInformation', 'Lightbulb']>, 
-        # updates_by_service={<service display_name=Lightbulb unique_id=None chars={'On': 1, 'Brightness': 88}>: {
-        #   <characteristic display_name=On unique_id=None value=1 properties={'Format': 'int', 'Permissions': 'pr'}>: True, 
-        #   <characteristic display_name=Brightness unique_id=None value=88 properties={'Format': 'int', 'Permissions': 'pr'}>: 88}}
-        
-        # acc=<accessory display_name='TestAcc2' services=['AccessoryInformation', 'Lightbulb']>, 
-        # updates_by_service={<service display_name=Lightbulb unique_id=None chars={'On': 1, 'Brightness': 12}>: {
-        #   <characteristic display_name=On unique_id=None value=1 properties={'Format': 'int', 'Permissions': 'pr'}>: True, 
-        #   <characteristic display_name=Brightness unique_id=None value=12 properties={'Format': 'int', 'Permissions': 'pr'}>: 12}}
+            updates_by_accessories_services \
+                .setdefault(acc, {}) \
+                .setdefault(char.service, {}) \
+                .update({char: value})
 
-
-        # {
-        #   'characteristics': [
-        #       {'aid': 2, 'iid': 9, 'status': 0}, 
-        #       {'aid': 2, 'iid': 10, 'status': 0}, 
-        #       {'aid': 3, 'iid': 9, 'status': -70402}, 
-        #       {'aid': 3, 'iid': 10, 'status': -70402}]} 
-        # 
-        # { 
-        #   'characteristics': [
-        #       {'aid': 2, 'iid': 9, 'status': -70402},
-        #       {'aid': 2, 'iid': 10, 'status': -70402},
-        #       {'aid': 3, 'iid': 9, 'status': -70402},
-        #       {'aid': 3, 'iid': 10, 'status': 0}]}
         for acc, updates_by_service in updates_by_accessories_services.items():
+            aid = acc.aid
+
             # Accessory level setter callbacks
             if acc.setter_callback:
                 set_result = _wrap_acc_setter(acc, updates_by_service, client_addr)
-                for iid in queries_by_aid_iid[aid]:
+
+                characteristics = (
+                    char for chars in updates_by_accessories_services[acc].values()
+                    for char in chars.keys()
+                )
+                for char in characteristics:
+                    iid = char_to_iid[char]
                     original = results.get(aid, {}).get(iid, {})
                     results.setdefault(aid, {})[iid] = {
-                        **original, 
+                        **original,
                         HAP_REPR_STATUS: set_result
                     }
+
             # Service level setter callbacks
             for service, chars in updates_by_service.items():
-                if service.setter_callback:
-                    set_result = _wrap_service_setter(service, chars, client_addr)
-                    for char in chars:
-                        original = results.get(aid, {}).get(char_to_iid[char], {})
-                        results.setdefault(aid, {})[char_to_iid[char]] = {
-                            **original, 
-                            HAP_REPR_STATUS: set_result
-                        }
+                if not service.setter_callback:
+                    continue
+                set_result = _wrap_service_setter(service, chars, client_addr)
+                for char in chars:
+                    iid = char_to_iid[char]
+                    original = results.get(aid, {}).get(iid, {})
+                    results.setdefault(aid, {})[iid] = {
+                        **original,
+                        HAP_REPR_STATUS: set_result
+                    }
 
-        all_results = [(aid, iid, result) for aid, iid_result in results.items() for iid, result in iid_result.items()]
-        nonempty_results = [r for r in all_results if r[-1] != {HAP_REPR_STATUS: HAP_SERVER_STATUS.SUCCESS}]
-
-        if len(nonempty_results) == 0:
-            return None 
-        
-        return {
-            HAP_REPR_CHARS: [
-                {
-                    HAP_REPR_AID: aid,
-                    HAP_REPR_IID: iid,
-                    **result
-                }
-                for aid, iid, result in all_results
-            ]
+        results = [
+            {HAP_REPR_AID: aid, HAP_REPR_IID: iid, **result}
+            for aid, iid_result in results.items()
+            for iid, result in iid_result.items()
+        ]
+        nonempty_results = [
+            result for result in results
+            if result[HAP_REPR_STATUS] != HAP_SERVER_STATUS.SUCCESS
+            or HAP_REPR_VALUE in result
+        ]
+        return None if len(nonempty_results) == 0 else {
+            HAP_REPR_CHARS: results
         }
 
     def prepare(self, prepare_query, client_addr):

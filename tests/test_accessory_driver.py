@@ -177,7 +177,7 @@ def test_write_response_returned_when_not_requested(driver: AccessoryDriver):
         },
         "mock_addr",
     )
-    assert response == None
+    assert response is None
 
     response = driver.set_characteristics(
         {
@@ -191,7 +191,7 @@ def test_write_response_returned_when_not_requested(driver: AccessoryDriver):
         },
         "mock_addr",
     )
-    assert response == None
+    assert response is None
 
 
 def test_write_response_returned_when_requested(driver: AccessoryDriver):
