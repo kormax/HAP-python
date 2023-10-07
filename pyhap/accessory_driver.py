@@ -861,9 +861,6 @@ class AccessoryDriver:
         """
         # TODO: Add support for chars that do no support notifications.
 
-        pid = chars_query.get(HAP_REPR_PID, None)
-        expire_time = self.prepared_writes.get(client_addr, {}).pop(pid, None)
-        expired = False if pid is None else expire_time is None or time.time() > expire_time
         queries = chars_query.get(HAP_REPR_CHARS, [])
 
         to_notify = (query for query in queries if HAP_PERMISSION_NOTIFY in query)
@@ -881,7 +878,11 @@ class AccessoryDriver:
         results = {}
         updates_by_accessories_services = {}
         char_to_iid = {}
-        
+
+        pid = chars_query.get(HAP_REPR_PID, None)
+        expire_time = self.prepared_writes.get(client_addr, {}).pop(pid, None)
+        expired = False if pid is None else expire_time is None or time.time() > expire_time
+
         to_update = (query for query in queries if HAP_REPR_VALUE in query or expired)
         for query in to_update:
             aid, iid = query[HAP_REPR_AID], query[HAP_REPR_IID]
@@ -953,9 +954,7 @@ class AccessoryDriver:
             if result[HAP_REPR_STATUS] != HAP_SERVER_STATUS.SUCCESS
             or HAP_REPR_VALUE in result
         ]
-        return None if len(nonempty_results) == 0 else {
-            HAP_REPR_CHARS: results
-        }
+        return {HAP_REPR_CHARS: results} if len(nonempty_results) else None
 
     def prepare(self, prepare_query, client_addr):
         """Called from ``HAPServerHandler`` when iOS wants to prepare a write.
